@@ -8,6 +8,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
+#Inicia a dag no horário configurado
 @dag(
     schedule='0 22 * * *',
     start_date=pendulum.datetime(2023, 12, 1),
@@ -18,10 +19,10 @@ from datetime import datetime, timedelta
 
 
 def b3_att():
-
+    #Define o formato em string para utilizar na URL
     def check_day_week(type_format: str):
             day_week = str(datetime.now().strftime("%A"))
-
+            #Realiza mapeamento dos dias da semana
             day_mapping = {
                 "Tuesday": 1,
                 "Wednesday": 1,
@@ -31,7 +32,7 @@ def b3_att():
                 "Sunday": 2,
                 "Monday": 3,
             }
-
+            #Faz uma verificação do dia da semana
             interval = day_mapping.get(day_week)
 
             check_format = {"date": "%Y-%m-%d", "date_br": "%d%m%Y"}
@@ -48,29 +49,28 @@ def b3_att():
         
         print("Iniciando procedimento no ano "+str(date)+"...")  
         
-        #URL do arquivo ZIP para baixar baixar
+        #URL do arquivo ZIP para baixar os dados da B3
         url = "https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_D" + str(date) + ".ZIP"
 
-        #Download do arquivo ZIP
         print("Baixando arquivo do dia " + str(date) +"...")
 
         response = requests.get(url)
 
-        #Verificando se o download deu certo
+        #Verifica se baixou corretamente
         if response.status_code == 200:
-
+            #reconhece o .zip
             zip_file = zipfile.ZipFile(BytesIO(response.content))
 
             file_list = zip_file.namelist()
-
+            #altera para .txt
             chosen_file = 'COTAHIST_D' + str(date) + '.TXT'
 
             extracted_file_content = zip_file.read(chosen_file)
-
+            #é definido na documentação da B3
             tamanho_campos=[2,8,2,12,3,12,10,3,4,13,13,13,13,13,13,13,5,18,18,13,1,8,7,13,12,3]
-            
+            #lê os dados
             dados_acoes = pd.read_fwf(BytesIO(extracted_file_content), widths=tamanho_campos, header=0)
-            
+            #define as colunas dos dados
             dados_acoes.columns = [    
             "tipo_registro",
             "data_pregao",
@@ -99,11 +99,11 @@ def b3_att():
             "cod_isin",
             "num_distribuicao_papel"
             ]
-            
+            #lê os dados e remove rodapé
             linha=len(dados_acoes["data_pregao"])
             dados_acoes=dados_acoes.drop(linha-1)
 
-            #Ajustando valores com vírgula
+            #Define quais colunas irá utilizar
             listaVirgula=[
             "preco_abertura",
             "preco_maximo",
@@ -116,7 +116,7 @@ def b3_att():
             "preco_exercicio",
             "preco_exercicio_pontos"
             ]
-
+            #realiza alteração dos tipos das colunas
             for coluna in listaVirgula:
                 dados_acoes[coluna]=[i/100. for i in dados_acoes[coluna]]
 
@@ -124,29 +124,36 @@ def b3_att():
             dados_acoes['data_pregao'] = dados_acoes['data_pregao'].dt.strftime('%Y-%m-%d')
             dados_acoes[['cod_bdi','fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']] \
                 = dados_acoes[['cod_bdi', 'fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']].astype(int)
-            
+            #finaliza alterações
             zip_file.close()
             print(f"Dia {date} Concluído")
             print(dados_acoes)
         else:
             print(f"Falha ao baixar o arquivo ")
-
+        #conexão no airflow
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
+        #recebe a conexão do hook
         conn = hook.get_conn()
+        #abre o cursor para executar sql dentro do python
         cur = conn.cursor()
         try:
+            #conexão
             engine = create_engine("postgresql+psycopg2://airflow:airflow@host.docker.internal/airflow")
             dados_acoes.to_sql(name='stage', con=engine, if_exists='append', index=False)
+            #realiza o commit
             conn.commit()
+            #fecha o requerimento
             cur.close()
         except Exception as e:
             print(e)
 
     @task()
+    #criar as tabelas
     def createTables():
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
         conn = hook.get_conn()
         cur = conn.cursor()
+        #dropa as tabelas e as relações
         cur.execute("""
                     DROP TABLE IF EXISTS dim_tipo_mercado CASCADE;
                     DROP TABLE IF EXISTS dim_empresas CASCADE;
@@ -155,6 +162,7 @@ def b3_att():
                     DROP TABLE IF EXISTS fato_pregao CASCADE;
                     """)
         conn.commit()
+        #cria tabelas dimensão e fato
         cur.execute("""
             CREATE TABLE dim_tipo_mercado (
                 tipo_mercado bigint PRIMARY KEY, 
@@ -211,7 +219,8 @@ def b3_att():
     def load():
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
         conn = hook.get_conn()
-        cur = conn.cursor()    
+        cur = conn.cursor()  
+        #define os tipos de mercado, de acordo com a documentaçaõ da B3
         cur.execute("""
             INSERT INTO dim_tipo_mercado (
                 SELECT DISTINCT tipo_mercado,
@@ -248,7 +257,7 @@ def b3_att():
             ON CONFLICT DO NOTHING
         """)
         conn.commit()
-
+        #define a classificação do papel (bdi), de acordo com a documentação da B3
         cur.execute("""
             INSERT INTO dim_cod_bdi (cod_bdi, desc_cod_bdi)
             SELECT DISTINCT cod_bdi,
@@ -301,7 +310,7 @@ def b3_att():
             FROM stage
         """)
         conn.commit()
-
+        #inserções na tabela fato
         cur.execute("""
             INSERT INTO fato_pregao(
                 id_pregao, cod_bdi, tipo_mercado, cod_negociacao, especificacao_papel, data_pregao, preco_melhor_oferta_compra, 
@@ -334,10 +343,10 @@ def b3_att():
         """)
         conn.commit()
         cur.close()  
-
+    #define as variáveis para fechar as funções
     createTables1 = createTables()
     extract_process1 = extract_process()
     load1 = load()
-
+    #define a ordem que as tasks serão realizadas
     createTables1 >> extract_process1 >> load1 >> []
 b3_att()

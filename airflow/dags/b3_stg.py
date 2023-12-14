@@ -7,6 +7,7 @@ from airflow.decorators import dag, task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from sqlalchemy import create_engine
 
+#define o momento que a dag será executada
 @dag(
     schedule='*/120 * * * *',
     start_date=pendulum.datetime(2018, 2, 1),
@@ -16,33 +17,33 @@ from sqlalchemy import create_engine
 
 def b3_retro():
     @task()
-    def process_data():
+    def process_data(): #inicia o processo de leitura dos arquivos anuais
         Ano = 2018
         while Ano <= 2023:
             print("Iniciando procedimento no ano "+str(Ano)+"...")  
             
-            #URL do arquivo ZIP para baixar baixar
+            #URL para baixar o arquivo ZIP da B3
             url = "https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_A" + str(Ano) + ".ZIP"
 
             #Download do arquivo ZIP
             print("Baixando arquivo do ano " + str(Ano) +"...")
             response = requests.get(url)
 
-            #Verificando se o download deu certo
+            #Verifica se o download deu certo
             if response.status_code == 200:
-
+                #lê o arquivo, extrai e guarda os dados em memória e manda pro dataframe
                 zip_file = zipfile.ZipFile(BytesIO(response.content))
-
+                #lê o arquivo zip
                 file_list = zip_file.namelist()
 
                 chosen_file = 'COTAHIST_A' + str(Ano) + '.TXT'
 
                 extracted_file_content = zip_file.read(chosen_file)
-
+                #define o tamanho, de acordo com a documentação da B3
                 tamanho_campos=[2,8,2,12,3,12,10,3,4,13,13,13,13,13,13,13,5,18,18,13,1,8,7,13,12,3]
-                
+                #realiza as alterações nos arquivos extraídos
                 dados_acoes = pd.read_fwf(BytesIO(extracted_file_content), widths=tamanho_campos, header=0)
-                
+                #define as colunas
                 dados_acoes.columns = [    
                 "tipo_registro",
                 "data_pregao",
@@ -71,11 +72,11 @@ def b3_retro():
                 "cod_isin",
                 "num_distribuicao_papel"
                 ]
-                
+                #retira o rodapé
                 linha=len(dados_acoes["data_pregao"])
                 dados_acoes=dados_acoes.drop(linha-1)
 
-                #Ajustando valores com vírgula
+                #define as colunas
                 listaVirgula=[
                 "preco_abertura",
                 "preco_maximo",
@@ -88,27 +89,32 @@ def b3_retro():
                 "preco_exercicio",
                 "preco_exercicio_pontos"
                 ]
-
+                #realiza o cálculo para alterar a vírgula
                 for coluna in listaVirgula:
                     dados_acoes[coluna]=[i/100. for i in dados_acoes[coluna]]
-
+                #altera os tipos dos dados
                 dados_acoes['data_pregao'] = pd.to_datetime(dados_acoes.data_pregao)
                 dados_acoes['data_pregao'] = dados_acoes['data_pregao'].dt.strftime('%Y-%m-%d')
                 dados_acoes[['cod_bdi','fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']] \
                     = dados_acoes[['cod_bdi', 'fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']].astype(int)
-                
+                #fechamento do arquivo
                 zip_file.close()
                 print(f"Ano {Ano} Concluído")
             else:
                 print(f"Falha ao baixar o arquivo ")
-
+            #conexão com airflow
             hook = PostgresHook(postgres_conn_id='postgres-airflow')
+            #recebe a conexão do hook
             conn = hook.get_conn()
+            #abre o cursor para executar sql dentro do python
             cur = conn.cursor()
             try:
+                #conexão
                 engine = create_engine("postgresql+psycopg2://airflow:airflow@host.docker.internal/airflow")
                 dados_acoes.to_sql(name='stage', con=engine, if_exists='append', index=False)
+                #realiza o commit
                 conn.commit()
+                #fecha o requerimento
                 cur.close()
             except Exception as e:
                 print(e)
@@ -117,9 +123,13 @@ def b3_retro():
             
     @task()
     def createStage():
+        #conexão com airflow
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
+        #realiza o commit
         conn = hook.get_conn()
+        ##abre o cursor para executar sql dentro do python
         cur = conn.cursor()
+        #dropa a tabela stage
         query = """
             DROP TABLE IF EXISTS stage;
 
@@ -153,18 +163,21 @@ def b3_retro():
                 , num_distribuicao_papel bigint
             ); 
             """
+        #executa a query
         cur.execute(query)
+        #commita
         conn.commit()
+        #fecha o requerimento
         cur.close()
 
-    # @task()
-    # def loadStage(dados_acoes):
-        
-
+    #criando as tabelas
     @task()
     def createTables():
+        #conexão com airflow
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
+        #recebe a conexão do hook
         conn = hook.get_conn()
+        #abre o cursor para executar sql dentro do python
         cur = conn.cursor()
         cur.execute("""
                     DROP TABLE IF EXISTS dim_tipo_mercado CASCADE;
@@ -228,9 +241,13 @@ def b3_retro():
 
     @task()
     def load():
+        #conexão no airflow
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
+        #recebe a conexão do hook
         conn = hook.get_conn()
+        #abre o cursor para executar sql dentro do python
         cur = conn.cursor()
+        #inserindo os dados dentro da tabela e definindo o tipo de mercado, de acordo com a documentação da B3
         cur.execute("""
             INSERT INTO dim_tipo_mercado (
                 SELECT DISTINCT tipo_mercado,
@@ -250,8 +267,9 @@ def b3_retro():
                 FROM stage
             )
         """)
+        #commita as alterações
         conn.commit()
-
+        #insere os dados dentro da tabela
         cur.execute("""
             INSERT INTO dim_empresas (cod_negociacao, nome_empresa)
             SELECT DISTINCT cod_negociacao, nome_empresa
@@ -259,7 +277,7 @@ def b3_retro():
             ON CONFLICT DO NOTHING
         """)
         conn.commit()
-
+        #insere os dados dentro da tabela
         cur.execute("""
             INSERT INTO dim_papeis(especificacao_papel, num_distribuicao_papel, cod_isin)
             SELECT DISTINCT especificacao_papel, num_distribuicao_papel, cod_isin 
@@ -267,7 +285,7 @@ def b3_retro():
             ON CONFLICT DO NOTHING
         """)
         conn.commit()
-
+        #define a classificação do papel (bdi), de acordo com a documentação da B3
         cur.execute("""
             INSERT INTO dim_cod_bdi (cod_bdi, desc_cod_bdi)
             SELECT DISTINCT cod_bdi,
@@ -319,8 +337,9 @@ def b3_retro():
                 END AS desc_cod_bdi
             FROM stage
         """)
+        #commita
         conn.commit()
-
+        #inserindo os dados na tabela fato
         cur.execute("""
             INSERT INTO fato_pregao(
                 id_pregao, cod_bdi, tipo_mercado, cod_negociacao, especificacao_papel, data_pregao, preco_melhor_oferta_compra, 
@@ -353,12 +372,13 @@ def b3_retro():
         """)
         conn.commit()
         cur.close()  
-    
+    #define as variáveis para fechar as funções
     process_data1 = process_data()
     createStage1 = createStage()
     createTables1 = createTables()
     load1 = load()
-
+    #define a ordem que as tasks serão realizadas
     [createStage1, createTables1] >> process_data1 >> load1
+#fechamento função principal (dag)
 b3_retro()
 
